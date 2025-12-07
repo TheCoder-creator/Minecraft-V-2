@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Minecraft Mini</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #87CEEB; }
+        canvas { display: block; background: #87CEEB; }
+        #hotbar {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 8px;
+            background: rgba(0,0,0,0.3);
+            padding: 10px;
+            border-radius: 10px;
+        }
+        .slot {
+            width: 50px;
+            height: 50px;
+            background: rgba(255,255,255,0.3);
+            border: 2px solid white;
+        }
+        #inventory {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 500px;
+            height: 300px;
+            background: rgba(0,0,0,0.8);
+            display: none;
+            padding: 20px;
+            color: white;
+        }
+        #gamemode {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            margin-left: 5px;
+        }
+    </style>
+</head>
+<body>
+
+<!-- Game Canvas -->
+<canvas id="game"></canvas>
+
+<!-- Hotbar -->
+<div id="hotbar">
+    <div class="slot"></div>
+    <div class="slot"></div>
+    <div class="slot"></div>
+    <div class="slot"></div>
+    <div class="slot"></div>
+</div>
+
+<!-- Inventory -->
+<div id="inventory">
+    <h2>Inventory</h2>
+    <p>Creative items coming soon...</p>
+</div>
+
+<!-- Gamemode Switch -->
+<div id="gamemode">
+    <button id="survivalBtn">Survival</button>
+    <button id="creativeBtn">Creative</button>
+</div>
+
+<script>
+// =====================
+// GAME LOOP (game.js)
+// =====================
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+function loop() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // TEMP WORLD PLACEHOLDER (replace later)
+    ctx.fillStyle = "green";
+    ctx.fillRect(canvas.width/2 - 50, canvas.height/2 - 50, 100, 100);
+
+    requestAnimationFrame(loop);
+}
+loop();
+
+// =====================
+// UI + GAME MODES (ui.js)
+// =====================
+let gamemode = "survival";
+
+// Inventory toggle (E)
+window.addEventListener("keydown", (e) => {
+    if (e.key === "e") {
+        const inv = document.getElementById("inventory");
+        inv.style.display = (inv.style.display === "none") ? "block" : "none";
+    }
+});
+
+// Gamemode buttons
+
+document.getElementById("survivalBtn").onclick = () => {
+    gamemode = "survival";
+    console.log("Gamemode: Survival");
+};
+
+document.getElementById("creativeBtn").onclick = () => {
+    gamemode = "creative";
+    console.log("Gamemode: Creative");
+};
+</script>
+
+</body>
+</html>
