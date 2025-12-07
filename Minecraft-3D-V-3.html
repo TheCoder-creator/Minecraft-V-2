@@ -1,122 +1,331 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-    <title>Minecraft Mini</title>
-    <style>
-        body { margin: 0; overflow: hidden; background: #87CEEB; }
-        canvas { display: block; background: #87CEEB; }
-        #hotbar {
-            position: fixed;
-            bottom: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            display: flex;
-            gap: 8px;
-            background: rgba(0,0,0,0.3);
-            padding: 10px;
-            border-radius: 10px;
-        }
-        .slot {
-            width: 50px;
-            height: 50px;
-            background: rgba(255,255,255,0.3);
-            border: 2px solid white;
-        }
-        #inventory {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 500px;
-            height: 300px;
-            background: rgba(0,0,0,0.8);
-            display: none;
-            padding: 20px;
-            color: white;
-        }
-        #gamemode {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-        }
-        button {
-            padding: 10px 20px;
-            margin-left: 5px;
-        }
-    </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>3D Minecraft — Real (Three.js)</title>
+<style>
+  html,body{ height:100%; margin:0; background:#87CEEB; font-family:system-ui,Arial; }
+  #hud { position:fixed; left:12px; top:12px; background:rgba(255,255,255,0.9); padding:8px 10px; border-radius:8px; z-index:20; }
+  #hotbar { position:fixed; left:50%; transform:translateX(-50%); bottom:16px; display:flex; gap:8px; z-index:20; }
+  .slot { width:56px; height:56px; border-radius:8px; background:rgba(255,255,255,0.95); display:flex; align-items:center; justify-content:center; box-shadow:0 4px 10px rgba(0,0,0,0.12); cursor:pointer; user-select:none; font-weight:700;}
+  .selected { outline:3px solid gold; }
+  #info { position:fixed; right:12px; top:12px; background:rgba(255,255,255,0.9); padding:8px 10px; border-radius:8px; z-index:20; }
+  #hint { position:fixed; left:12px; bottom:12px; background:rgba(255,255,255,0.9); padding:6px 10px; border-radius:8px; z-index:20; }
+  canvas { display:block; }
+  button { padding:6px 10px; margin-left:6px; }
+</style>
 </head>
 <body>
+  <div id="hud">Inventory: <span id="inv">0</span></div>
+  <div id="info">Gamemode:<button id="btnSurv">Survival</button><button id="btnCreat">Creative</button></div>
+  <div id="hotbar"></div>
+  <div id="hint">Click view to lock mouse • WASD move • Space jump • Left-click break • Right-click place • 1–5 select • E toggle GM</div>
 
-<!-- Game Canvas -->
-<canvas id="game"></canvas>
-
-<!-- Hotbar -->
-<div id="hotbar">
-    <div class="slot"></div>
-    <div class="slot"></div>
-    <div class="slot"></div>
-    <div class="slot"></div>
-    <div class="slot"></div>
-</div>
-
-<!-- Inventory -->
-<div id="inventory">
-    <h2>Inventory</h2>
-    <p>Creative items coming soon...</p>
-</div>
-
-<!-- Gamemode Switch -->
-<div id="gamemode">
-    <button id="survivalBtn">Survival</button>
-    <button id="creativeBtn">Creative</button>
-</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
 
 <script>
-// =====================
-// GAME LOOP (game.js)
-// =====================
-const canvas = document.getElementById("game");
-const ctx = canvas.getContext("2d");
+// ---------- CONFIG ----------
+const WORLD = 64;        // X/Z dimension
+const MAX_H = 24;        // max height
+const BASE_H = 6;        // base height
+const BLOCK = 1;
+const SEED = Math.floor(Math.random()*1000000);
+const BT = { AIR:0, GRASS:1, DIRT:2, STONE:3 };
+const BLOCK_NAMES = {1:'Grass',2:'Dirt',3:'Stone'};
+const HOTBAR_TYPES = [BT.DIRT, BT.GRASS, BT.STONE, BT.DIRT, BT.DIRT];
 
-canvas.width = window.innerWidth;
-canvas.height = window.innerHeight;
+let gamemode = 'survival'; // or 'creative'
+const hudInv = document.getElementById('inv');
+const btnSurv = document.getElementById('btnSurv'), btnCreat = document.getElementById('btnCreat');
+btnSurv.onclick = ()=>{ gamemode='survival'; btnSurv.disabled=true; btnCreat.disabled=false; updateInvDisplay(); };
+btnCreat.onclick = ()=>{ gamemode='creative'; btnCreat.disabled=true; btnSurv.disabled=false; updateInvDisplay(); };
+btnSurv.disabled = true;
 
-function loop() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // TEMP WORLD PLACEHOLDER (replace later)
-    ctx.fillStyle = "green";
-    ctx.fillRect(canvas.width/2 - 50, canvas.height/2 - 50, 100, 100);
-
-    requestAnimationFrame(loop);
+// ---------- Noise (value noise + octaves) ----------
+function hash(i,j,seed=0){
+  let n = i + j*57 + seed*1315423911;
+  n = (n<<13) ^ n;
+  return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0);
 }
-loop();
+function smooth(t){ return t*t*(3-2*t); }
+function valueNoise2D(x,y,seed=0){
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const a = hash(xi, yi, seed), b = hash(xi+1, yi, seed), c = hash(xi, yi+1, seed), d = hash(xi+1, yi+1, seed);
+  const u = smooth(xf), v = smooth(yf);
+  const x1 = a*(1-u)+b*u, x2 = c*(1-u)+d*u;
+  return (x1*(1-v) + x2*v) * 0.5 + 0.5;
+}
+function octave(x,y,oct=4,seed=0){
+  let tot=0, amp=1, freq=1, max=0;
+  for(let i=0;i<oct;i++){
+    tot += valueNoise2D(x*freq, y*freq, seed + i*131) * amp;
+    max += amp; amp *= 0.5; freq*=2;
+  }
+  return tot/max;
+}
 
-// =====================
-// UI + GAME MODES (ui.js)
-// =====================
-let gamemode = "survival";
+// ---------- World arrays ----------
+let heights = new Int32Array(WORLD * WORLD); // per x,z
+let world = new Uint8Array(WORLD * MAX_H * WORLD); // 3D flattened: x + z*WORLD + y*WORLD*WORLD? We'll use function index
 
-// Inventory toggle (E)
-window.addEventListener("keydown", (e) => {
-    if (e.key === "e") {
-        const inv = document.getElementById("inventory");
-        inv.style.display = (inv.style.display === "none") ? "block" : "none";
+function idx(x,y,z){ return x + z*WORLD + y*WORLD*WORLD; }
+
+// generate terrain
+function generateTerrain(){
+  for(let x=0;x<WORLD;x++){
+    for(let z=0;z<WORLD;z++){
+      const nx = (x - WORLD/2)/10, nz = (z - WORLD/2)/10;
+      const h = Math.floor(BASE_H + octave(nx, nz, 4, SEED) * (MAX_H - BASE_H));
+      heights[x + z*WORLD] = h;
+      for(let y=0;y<MAX_H;y++){
+        world[idx(x,y,z)] = (y <= h ? (y === h ? BT.GRASS : (y < h-3 ? BT.STONE : BT.DIRT)) : BT.AIR);
+      }
+      // carve caves
+      for(let y=2; y<h-2; y++){
+        const c = octave(x/6, y/6 + z/8, 3, SEED+500);
+        if(c > 0.72) world[idx(x,y,z)] = BT.AIR;
+      }
     }
-});
+  }
+}
+generateTerrain();
 
-// Gamemode buttons
+// ---------- THREE.JS setup ----------
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(window.devicePixelRatio || 1);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
 
-document.getElementById("survivalBtn").onclick = () => {
-    gamemode = "survival";
-    console.log("Gamemode: Survival");
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87CEEB);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.position.set(0, 20, 30);
+camera.lookAt(0, 10, 0);
+
+const light = new THREE.DirectionalLight(0xffffff, 1.0);
+light.position.set(30, 80, 50);
+scene.add(light);
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+
+// ---------- InstancedMeshes per block type ----------
+const box = new THREE.BoxGeometry(BLOCK, BLOCK, BLOCK);
+const mats = {
+  [BT.GRASS]: new THREE.MeshLambertMaterial({ color:0x55aa44 }),
+  [BT.DIRT]:  new THREE.MeshLambertMaterial({ color:0x8b5a2b }),
+  [BT.STONE]: new THREE.MeshLambertMaterial({ color:0x8a8a8a })
 };
 
-document.getElementById("creativeBtn").onclick = () => {
-    gamemode = "creative";
-    console.log("Gamemode: Creative");
-};
+const maxInstances = WORLD*WORLD*8; // conservative
+const inst = {};
+const counts = {};
+for(const t of [BT.GRASS,BT.DIRT,BT.STONE]){
+  inst[t] = new THREE.InstancedMesh(box, mats[t], maxInstances);
+  inst[t].instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  inst[t].count = 0;
+  scene.add(inst[t]);
+  counts[t] = 0;
+}
+
+// reverse mapping for raycast: mesh.uuid + '|' + id -> 'x,y,z'
+const rev = new Map();
+
+function rebuildInstances(){
+  // reset counts
+  for(const k in counts) counts[k]=0;
+  rev.clear();
+  for(let x=0;x<WORLD;x++){
+    for(let z=0; z<WORLD; z++){
+      for(let y=0;y<MAX_H;y++){
+        const b = world[idx(x,y,z)];
+        if(b === BT.AIR) continue;
+        if(!inst[b]) continue;
+        const id = counts[b]++;
+        const m = inst[b];
+        const temp = new THREE.Object3D();
+        temp.position.set((x - WORLD/2 + 0.5)*BLOCK, y*BLOCK + 0.5*BLOCK, (z - WORLD/2 + 0.5)*BLOCK);
+        temp.updateMatrix();
+        m.setMatrixAt(id, temp.matrix);
+        m.count = counts[b];
+        m.instanceMatrix.needsUpdate = true;
+        rev.set(m.uuid + '|' + id, `${x},${y},${z}`);
+      }
+    }
+  }
+}
+rebuildInstances();
+
+// ---------- Player physics & controls (first-person) ----------
+const player = { x: 0, y: 0, z: 0, vx:0, vy:0, vz:0, speed:7 };
+player.x = 0; player.z = 0; player.y = heights[Math.floor(WORLD/2)+Math.floor(WORLD/2)*WORLD] + 2;
+
+let yaw=0, pitch=0, pointerLocked=false;
+function onPointerMove(e){
+  if(!pointerLocked) return;
+  yaw -= e.movementX * 0.002;
+  pitch -= e.movementY * 0.002;
+  pitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, pitch));
+  camera.rotation.set(pitch, yaw, 0, 'ZYX');
+}
+document.addEventListener('click', ()=>{ renderer.domElement.requestPointerLock?.(); });
+document.addEventListener('pointerlockchange', ()=> { pointerLocked = (document.pointerLockElement === renderer.domElement); });
+document.addEventListener('mousemove', onPointerMove);
+
+const keys = {};
+addEventListener('keydown', e=> keys[e.key.toLowerCase()] = true);
+addEventListener('keyup', e=> keys[e.key.toLowerCase()] = false);
+
+// helper: get height at (worldX, worldZ) using column heights (interpolate)
+function getColumnHeight(wx, wz){
+  const xi = Math.floor(wx + WORLD/2);
+  const zi = Math.floor(wz + WORLD/2);
+  if(xi < 0 || zi < 0 || xi >= WORLD || zi >= WORLD) return 0;
+  return heights[xi + zi*WORLD];
+}
+
+// movement integration + collision (very simple: sample column height under player)
+function updatePlayer(dt){
+  // input
+  const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+  const right = new THREE.Vector3(Math.sin(yaw + Math.PI/2), 0, Math.cos(yaw + Math.PI/2));
+  let move = new THREE.Vector3();
+  if(keys['w']) move.add(forward);
+  if(keys['s']) move.sub(forward);
+  if(keys['a']) move.sub(right);
+  if(keys['d']) move.add(right);
+  if(move.lengthSq() > 0) move.normalize();
+
+  // accelerate
+  player.vx = move.x * player.speed;
+  player.vz = move.z * player.speed;
+
+  // gravity
+  player.vy -= 24 * dt;
+
+  // integrate
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+  player.z += player.vz * dt;
+
+  // ground collision by sampling column height
+  const ground = getColumnHeight(player.x, player.z);
+  const eye = 1.6;
+  if(player.y < ground + eye){
+    player.y = ground + eye;
+    player.vy = 0;
+    if(keys[' ']) { player.vy = 9; } // jump
+  }
+
+  // update camera to player position
+  camera.position.set(player.x, player.y, player.z + 0.01); // tiny forward offset
+}
+
+// ---------- Raycast break/place ----------
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2(0, 0);
+function breakOrPlace(evt){
+  // shoot ray from camera forward
+  raycaster.setFromCamera(pointer, camera);
+  const candidates = [inst[BT.GRASS], inst[BT.DIRT], inst[BT.STONE]].filter(Boolean);
+  const hits = raycaster.intersectObjects(candidates);
+  if(hits.length === 0) return;
+  const hit = hits[0];
+  const mesh = hit.object;
+  const iid = hit.instanceId;
+  const key = mesh.uuid + '|' + iid;
+  const posStr = rev.get(key);
+  if(!posStr) return;
+  const [x,y,z] = posStr.split(',').map(Number);
+  if(evt.button === 0){
+    // break
+    const bid = world[idx(x,y,z)];
+    world[idx(x,y,z)] = BT.AIR;
+    rebuildInstances();
+    // in survival, add to inventory
+    if(gamemode === 'survival'){
+      inventory[bid] = (inventory[bid]||0) + 1;
+      updateInvDisplay();
+    }
+  } else if(evt.button === 2){
+    // place adjacent — use face normal from hit
+    const normal = hit.face.normal.clone();
+    // face.normal is in local space; it's aligned with axes here
+    const px = x + Math.round(normal.x);
+    const py = y + Math.round(normal.y);
+    const pz = z + Math.round(normal.z);
+    if(px<0||px>=WORLD||py<0||py>=MAX_H||pz<0||pz>=WORLD) return;
+    if(world[idx(px,py,pz)] !== BT.AIR) return;
+    // check inventory or creative
+    const placeType = HOTBAR_TYPES[hotSelected];
+    if(gamemode === 'creative' || (inventory[placeType] && inventory[placeType] > 0)){
+      if(gamemode !== 'creative') inventory[placeType]--;
+      world[idx(px,py,pz)] = placeType;
+      rebuildInstances();
+      updateInvDisplay();
+    }
+  }
+}
+renderer.domElement.addEventListener('mousedown', breakOrPlace);
+renderer.domElement.addEventListener('contextmenu', e=> e.preventDefault());
+
+// ---------- Instantly selectable hotbar UI ----------
+const hotbar = document.getElementById('hotbar');
+let hotSelected = 0;
+function buildHotbar(){
+  hotbar.innerHTML = '';
+  for(let i=0;i<5;i++){
+    const t = HOTBAR_TYPES[i];
+    const d = document.createElement('div');
+    d.className = 'slot' + (i===hotSelected? ' selected':'');
+    d.innerText = BLOCK_NAMES[t] || 'Air';
+    d.onclick = ()=> { setHot(i); };
+    hotbar.appendChild(d);
+  }
+}
+function setHot(i){
+  const prev = hotbar.children[hotSelected];
+  if(prev) prev.classList.remove('selected');
+  hotSelected = i;
+  const curr = hotbar.children[hotSelected];
+  if(curr) curr.classList.add('selected');
+  updateInvDisplay();
+}
+buildHotbar();
+window.addEventListener('keydown', e=> { if(e.key>='1' && e.key<='5') setHot(Number(e.key)-1); if(e.key.toLowerCase()==='e'){ gamemode = (gamemode==='survival'?'creative':'survival'); btnSurv.disabled = gamemode==='survival'; btnCreat.disabled = gamemode==='creative'; updateInvDisplay(); } });
+
+// ---------- Inventory display ----------
+const inventory = {};
+// seed inventory
+inventory[BT.DIRT] = 8;
+inventory[BT.GRASS] = 2;
+inventory[BT.STONE] = 0;
+function updateInvDisplay(){
+  const type = HOTBAR_TYPES[hotSelected];
+  hudInv.textContent = (inventory[type]||0) + ' x ' + (BLOCK_NAMES[type] || 'Block') + ' (' + gamemode + ')';
+}
+updateInvDisplay();
+
+// ---------- Main loop ----------
+let last = performance.now();
+function animate(){
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - last)/1000);
+  last = now;
+  updatePlayer(dt);
+  renderer.render(scene, camera);
+}
+animate();
+
+// ---------- Resize ----------
+window.addEventListener('resize', ()=>{ renderer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); });
+
+// ---------- Final log ----------
+console.log('3D world ready. Seed:', SEED);
+
 </script>
-
 </body>
 </html>
+
