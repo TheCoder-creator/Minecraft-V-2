@@ -1,0 +1,396 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>3D Mini-Minecraft — Medium (64x64)</title>
+  <style>
+    html,body { height:100%; margin:0; background:#7ec0f0; overflow:hidden; }
+    #overlay { position: absolute; left:10px; top:10px; z-index:2; background:rgba(255,255,255,0.9); padding:8px 10px; border-radius:8px; font-family:system-ui,Arial; }
+    #hint { position:absolute; left:10px; bottom:10px; z-index:2; background:rgba(255,255,255,0.9); padding:6px 8px; border-radius:6px; font-family:system-ui,Arial; }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <div id="overlay">Click the view to lock mouse • WASD to move • Space jump • Left-click break • Right-click place</div>
+  <div id="hint">Medium world (64×64)</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+
+<script>
+/* 3D Mini-Minecraft (medium) — single-file
+   - Uses InstancedMesh for blocks
+   - Medium world (WORLD=64)
+   - Pointer-lock + mouse look + WASD movement
+   - Break/place using raycast against InstancedMesh (instanceId)
+*/
+
+// ---------- Basic Three.js setup ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio ? window.devicePixelRatio : 1);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87CEEB);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+// lighting
+const hemi = new THREE.HemisphereLight(0xffffcc, 0x444455, 0.9);
+hemi.position.set(0, 200, 0);
+scene.add(hemi);
+
+const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(50, 100, 50);
+scene.add(sun);
+
+// ---------- Parameters ----------
+const WORLD = 64;            // X/Z size
+const MAX_HEIGHT = 18;       // max height
+const BLOCK_SIZE = 1;        // cube size
+const BASE_HEIGHT = 6;       // base offset
+// We'll create an instanced mesh sized to WORLD*WORLD*MAX_HEIGHT (upper bound)
+const MAX_INSTANCES = WORLD * WORLD * (MAX_HEIGHT);
+
+// ---------- Simple deterministic value noise (cheap, non-module) ----------
+function hash2(i,j,seed=0){
+  let n = i + j*57 + seed*1315423911;
+  n = (n<<13) ^ n;
+  return (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0);
+}
+function smoothstep(t){ return t*t*(3-2*t); }
+function valueNoise2D(x,y,seed=0){
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const a = hash2(xi, yi, seed), b = hash2(xi+1, yi, seed), c = hash2(xi, yi+1, seed), d = hash2(xi+1, yi+1, seed);
+  const u = smoothstep(xf), v = smoothstep(yf);
+  const x1 = a*(1-u) + b*u;
+  const x2 = c*(1-u) + d*u;
+  return (x1*(1-v) + x2*v) * 0.5 + 0.5;
+}
+function octaveNoise(x,y,oct=3,seed=0){
+  let total = 0, amp = 1, freq = 1, max = 0;
+  for(let i=0;i<oct;i++){
+    total += valueNoise2D(x*freq, y*freq, seed + i*77) * amp;
+    max += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return total / max;
+}
+
+// ---------- Create block InstancedMesh ----------
+const boxGeo = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+const matGrass = new THREE.MeshLambertMaterial({ color: 0x55aa44 });
+const matDirt  = new THREE.MeshLambertMaterial({ color: 0x8b5a2b });
+const matStone = new THREE.MeshLambertMaterial({ color: 0x8a8a8a });
+
+// We'll use one material (dirt) for the mesh, and color instances via instanceColor if supported.
+// But to keep compatibility, we will create three instanced meshes (grass/dirt/stone) to color per type.
+const maxInstances = MAX_INSTANCES;
+const instGrass = new THREE.InstancedMesh(boxGeo, matGrass, maxInstances);
+const instDirt  = new THREE.InstancedMesh(boxGeo, matDirt, maxInstances);
+const instStone = new THREE.InstancedMesh(boxGeo, matStone, maxInstances);
+
+// counts
+let countGrass = 0, countDirt = 0, countStone = 0;
+
+// map from key "x,z,y" to {type, instanceId, meshRef}
+// to allow break/place handling
+const blockMap = new Map();
+
+// helper to set instance matrix
+const dummyMatrix = new THREE.Object3D();
+
+function addInstance(mesh, instIndex, x,y,z){
+  dummyMatrix.position.set(x * BLOCK_SIZE, y * BLOCK_SIZE, z * BLOCK_SIZE);
+  dummyMatrix.updateMatrix();
+  mesh.setMatrixAt(instIndex, dummyMatrix.matrix);
+  mesh.instanceMatrix.needsUpdate = true;
+}
+
+// ---------- Generate terrain (medium world) ----------
+const seed = Math.floor(Math.random()*999999);
+const heightArray = new Int32Array(WORLD*WORLD);
+
+for(let xi=0; xi<WORLD; xi++){
+  for(let zi=0; zi<WORLD; zi++){
+    // center coords to spread terrain nicely
+    const x = xi - WORLD/2;
+    const z = zi - WORLD/2;
+    // base height from octave noise
+    const n = octaveNoise(x*0.08, z*0.08, 4, seed);
+    const hill = Math.floor(n * (MAX_HEIGHT - BASE_HEIGHT));
+    const h = Math.max(1, Math.min(MAX_HEIGHT-1, BASE_HEIGHT + hill));
+    heightArray[xi*WORLD + zi] = h;
+  }
+}
+
+// populate instanced meshes by scanning columns
+for(let xi=0; xi<WORLD; xi++){
+  for(let zi=0; zi<WORLD; zi++){
+    const h = heightArray[xi*WORLD + zi];
+    for(let y=0; y<=h; y++){
+      // tiny cave carving: 3D noise
+      const cx = xi - WORLD/2, cz = zi - WORLD/2;
+      const caveNoise = valueNoise2D((cx)*0.15, (y)*0.18 + (cz)*0.15, seed+900);
+      if(caveNoise > 0.7 && y < h - 2) {
+        // carve cave: leave empty
+        continue;
+      }
+      // choose block type by depth
+      let type = 'dirt';
+      if(y === h) type = 'grass';
+      if(y < h - 3) type = 'stone';
+
+      const wx = xi - WORLD/2;
+      const wz = zi - WORLD/2;
+      if(type === 'grass'){
+        addInstance(instGrass, countGrass, wx, y, wz);
+        const key = `${wx},${wz},${y}`;
+        blockMap.set(key, {type:'grass', id:countGrass, mesh:instGrass});
+        countGrass++;
+      } else if(type === 'dirt'){
+        addInstance(instDirt, countDirt, wx, y, wz);
+        const key = `${wx},${wz},${y}`;
+        blockMap.set(key, {type:'dirt', id:countDirt, mesh:instDirt});
+        countDirt++;
+      } else {
+        addInstance(instStone, countStone, wx, y, wz);
+        const key = `${wx},${wz},${y}`;
+        blockMap.set(key, {type:'stone', id:countStone, mesh:instStone});
+        countStone++;
+      }
+
+    }
+  }
+}
+
+// set count to avoid rendering unused instances
+instGrass.count = countGrass;
+instDirt.count = countDirt;
+instStone.count = countStone;
+scene.add(instGrass, instDirt, instStone);
+
+// ---------- Basic first-person controls (pointer lock + mouse look) ----------
+let yaw = 0, pitch = 0;
+let pointerLocked = false;
+const PI_2 = Math.PI / 2;
+
+function onPointerMove(e){
+  if(!pointerLocked) return;
+  const movementX = e.movementX || e.mozMovementX || e.webkitMovementX || 0;
+  const movementY = e.movementY || e.mozMovementY || e.webkitMovementY || 0;
+  yaw -= movementX * 0.002;
+  pitch -= movementY * 0.002;
+  pitch = Math.max(-PI_2 + 0.01, Math.min( PI_2 - 0.01, pitch ));
+  camera.rotation.set(pitch, yaw, 0, 'ZYX');
+}
+
+document.addEventListener('click', () => {
+  renderer.domElement.requestPointerLock?.();
+});
+document.addEventListener('pointerlockchange', () => {
+  pointerLocked = (document.pointerLockElement === renderer.domElement);
+});
+document.addEventListener('mousemove', onPointerMove, false);
+
+// ---------- Movement physics ----------
+const keys = {};
+addEventListener('keydown', e => keys[e.code] = true);
+addEventListener('keyup', e => keys[e.code] = false);
+
+let velocity = new THREE.Vector3();
+let canJump = false;
+camera.position.set(0, 20, 0);
+
+// simple ground detection by checking camera y vs column height
+function getHeightAtWorld(xf, zf){
+  const xi = Math.floor(xf + WORLD/2);
+  const zi = Math.floor(zf + WORLD/2);
+  if(xi < 0 || zi < 0 || xi >= WORLD || zi >= WORLD) return 0;
+  return heightArray[xi*WORLD + zi] * BLOCK_SIZE + 0.9;
+}
+
+function updateMovement(dt){
+  const speed = 6;
+  const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw));
+  const right = new THREE.Vector3(Math.sin(yaw + Math.PI/2), 0, Math.cos(yaw + Math.PI/2));
+
+  let move = new THREE.Vector3();
+  if(keys['KeyW']) move.add(forward);
+  if(keys['KeyS']) move.sub(forward);
+  if(keys['KeyA']) move.sub(right);
+  if(keys['KeyD']) move.add(right);
+  if(move.lengthSq() > 0) move.normalize();
+
+  // apply horizontal movement
+  velocity.x += move.x * speed * dt * 8;
+  velocity.z += move.z * speed * dt * 8;
+
+  // gravity
+  velocity.y -= 20 * dt;
+
+  // apply damping
+  velocity.x *= 0.85;
+  velocity.z *= 0.85;
+
+  // jump
+  if(keys['Space'] && canJump){
+    velocity.y = 8;
+    canJump = false;
+  }
+
+  // integrate position
+  camera.position.addScaledVector(velocity, dt);
+
+  // ground collision: clamp to column height + camera eye offset
+  const groundY = getHeightAtWorld(camera.position.x, camera.position.z);
+  const eyeOffset = 1.6;
+  if(camera.position.y < groundY + eyeOffset){
+    camera.position.y = groundY + eyeOffset;
+    velocity.y = 0;
+    canJump = true;
+  }
+}
+
+// ---------- Raycast break/place ----------
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2(0,0); // center screen ray
+
+// We need a simple way to mark an instance as removed: we'll move it far below and decrement mesh.count,
+// and track free instance slots to reuse for placement.
+const freeGrass = [];
+const freeDirt = [];
+const freeStone = [];
+
+function removeBlockInstance(info){
+  // info = {type,id,mesh}
+  const mesh = info.mesh;
+  const id = info.id;
+  // move instance far below and optionally swap with last instance to keep dense arrays
+  // simpler: set its matrix scaling to 0 to hide
+  dummyMatrix.position.set(9999, -9999, 9999);
+  dummyMatrix.updateMatrix();
+  mesh.setMatrixAt(id, dummyMatrix.matrix);
+  mesh.instanceMatrix.needsUpdate = true;
+  // register free slot
+  if(mesh === instGrass) freeGrass.push(id);
+  else if(mesh === instDirt) freeDirt.push(id);
+  else if(mesh === instStone) freeStone.push(id);
+}
+
+function placeBlockAdjacent(hit, placeType){
+  // hit: intersection object from raycast (has object, face, instanceId)
+  const face = hit.face; // normal points outward
+  const instanceId = hit.instanceId;
+  const obj = hit.object;
+  // get world position of the intersected face center
+  const m = new THREE.Matrix4();
+  obj.getMatrixAt(instanceId, m);
+  const pos = new THREE.Vector3().setFromMatrixPosition(m);
+  // face normal in world space (face.normal is in local)
+  const normal = new THREE.Vector3(face.normal.x, face.normal.y, face.normal.z);
+  // compute target block position located adjacent along normal
+  const target = pos.clone().addScaledVector(normal, 1);
+  const tx = Math.round(target.x);
+  const ty = Math.round(target.y);
+  const tz = Math.round(target.z);
+  const key = `${tx},${tz},${ty}`;
+  if(blockMap.has(key)) return; // already block present - don't place
+  // choose mesh to place into using free slot if available
+  let chosenMesh, chosenFree;
+  if(placeType === 'grass'){ chosenMesh = instGrass; chosenFree = freeGrass; }
+  else if(placeType === 'dirt'){ chosenMesh = instDirt; chosenFree = freeDirt; }
+  else { chosenMesh = instStone; chosenFree = freeStone; }
+  let slot = null;
+  // reuse free slot or append at end
+  if(chosenFree.length) slot = chosenFree.pop();
+  else {
+    slot = chosenMesh.count;
+    chosenMesh.count++;
+  }
+  addInstance(chosenMesh, slot, tx, ty, tz);
+  chosenMesh.instanceMatrix.needsUpdate = true;
+  blockMap.set(`${tx},${tz},${ty}`, {type:placeType, id:slot, mesh:chosenMesh});
+}
+
+// helper to pick block type for placement (use dirt)
+const PLACE_TYPE = 'dirt';
+
+// mouse handlers
+renderer.domElement.addEventListener('mousedown', (ev) => {
+  if(!pointerLocked) return;
+  raycaster.setFromCamera(pointer, camera);
+  // intersect with all 3 instanced meshes; rays will return intersections with instanceId
+  const hits = raycaster.intersectObjects([instGrass, instDirt, instStone]);
+  if(hits.length === 0) return;
+  const top = hits[0];
+  if(ev.button === 0){
+    // left-click: break
+    const hitObj = top.object;
+    const iid = top.instanceId;
+    // find which mesh and id mapping to coordinates: we stored mapping when created (key->info) but we don't have inverse map; we'll search blockMap for matching {mesh,id} entry.
+    // To speed up, keep a reverse map from mesh+id => key. Build once when generating.
+    const revKey = getRevKeyFor(meshIdKey(top.object, iid));
+    if(revKey){
+      const info = blockMap.get(revKey);
+      removeBlockInstance(info);
+      blockMap.delete(revKey);
+    } else {
+      // fallback: try to remove by scanning blockMap (slower)
+      for(const [k,v] of blockMap.entries()){
+        if(v.mesh === top.object && v.id === iid){
+          removeBlockInstance(v);
+          blockMap.delete(k);
+          break;
+        }
+      }
+    }
+  } else if(ev.button === 2){
+    // right-click: place adjacent to hit face
+    placeBlockAdjacent(top, PLACE_TYPE);
+  }
+});
+
+// Because we need a fast inverse lookup from (mesh, id) -> key, create a map when generating
+const revMap = new Map(); // key: mesh.uuid + '|' + id -> keyString
+function meshIdKey(mesh, id){ return mesh.uuid + '|' + id; }
+function getRevKeyFor(k){ return revMap.get(k); }
+
+// fill revMap from blockMap
+(function buildReverseMap(){
+  for(const [key, info] of blockMap.entries()){
+    revMap.set(meshIdKey(info.mesh, info.id), key);
+  }
+})();
+
+// ---------- Animation loop ----------
+let last = performance.now();
+function animate(){
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - last)/1000);
+  last = now;
+
+  updateMovement(dt);
+
+  // update instanceMatrix needsUpdate already set when modified
+  renderer.render(scene, camera);
+}
+animate();
+
+// ---------- Helpers / Resize ----------
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------- Utility: debugging stats ----------
+console.log('World generated. Counts — grass:', countGrass, 'dirt:', countDirt, 'stone:', countStone);
+
+// ---------- End of file ----------
+</script>
+</body>
+</html>
